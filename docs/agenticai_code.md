@@ -2000,8 +2000,11 @@ function setRunning(on) {
 }
 function startPolling() { if (polling) clearInterval(polling); polling = setInterval(poll, 650); poll(); }
 
+let firstPoll = true;
 async function poll() {
   const s = await api('/api/status');
+  // On page load show an empty dashboard, not the previous run -- unless a run is in progress.
+  if (firstPoll) { firstPoll = false; if (s.status !== 'running') { setRunning(false); return; } }
   const nodes = s.nodes || {};
   renderLog(s.logs || [], s.status === 'running');
   updatePipeline(nodes, s.status);
@@ -2219,6 +2222,11 @@ async function loadHistory() {
         <span>#${r.id} · ${new Date(r.created_at).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'})}</span>
         <span class="n">${r.article_count} stories</span></li>`).join('')
     : '<li><span class="sub">No runs yet</span></li>';
+  const box = document.querySelector('#digest .empty');
+  if (box && rows.length && !box.querySelector('.past-hint')) {
+    box.insertAdjacentHTML('beforeend', `<p class="sub past-hint" style="margin-top:16px">${rows.length} earlier
+      digest${rows.length > 1 ? 's' : ''} saved. Pick one under Past digests.</p>`);
+  }
 }
 
 /* ---------------- settings drawer ---------------- */
@@ -2342,7 +2350,7 @@ document.addEventListener('keydown', e => {
 $('btn-run').innerHTML = RUN_LABEL;
 updatePipeline();
 renderFunnel({});
-loadSettings().then(() => showDigest(null)).then(loadHistory);
+loadSettings().then(renderEmpty).then(loadHistory);   // start empty; past digests stay in the list
 poll();
 const _hash = location.hash.match(/^#configure(?:-(\w+))?/);   // deep link: #configure-filters
 if (_hash) openDrawer(_hash[1]);
