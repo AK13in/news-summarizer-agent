@@ -1,0 +1,13 @@
+# Render "Blueprint": New + > Blueprint > pick this repo. Render builds the Dockerfile.
+services:
+  - type: web
+    name: news-summarizer-agent
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      # you are asked for these when you create the service; they are never stored in git
+      - key: APP_PASSWORD
+        sync: false
+      - key: ANTHROPIC_API_KEY   # optional: leave empty to use the free rule-based summaries
+        sync: false

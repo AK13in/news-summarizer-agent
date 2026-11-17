@@ -57,6 +57,10 @@ python agenticai.py --port 8080  # choose a port
    ANTHROPIC_API_KEY    Claude API key (https://platform.claude.com)
    NEWS_AGENT_MODEL     default "claude-opus-5-5"
    NEWS_AGENT_PORT      default 8000
+   PORT                 overrides NEWS_AGENT_PORT (hosting platforms set this)
+   NEWS_AGENT_HOST      default 127.0.0.1; use 0.0.0.0 when deploying
+   NEWS_AGENT_DB        path of the SQLite file (default: next to this script)
+   APP_PASSWORD         if set, every page and API call asks for this password
    DAILY_RUN_AT         e.g. "07:30" -> runs itself once a day at that local time
    SLACK_WEBHOOK_URL    Slack incoming webhook, for the "Send to Slack" button
    SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASS EMAIL_FROM EMAIL_TO   for email delivery
@@ -72,11 +76,13 @@ python agenticai.py --port 8080  # choose a port
 from __future__ import annotations
 
 import argparse
+import base64
 import calendar
 import hashlib
 import json
 import os
 import re
+import secrets
 import smtplib
 import socket
 import sqlite3
@@ -132,7 +138,8 @@ except ImportError:
     anthropic = None  # type: ignore
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(APP_DIR, "news_agent.db")
+DB_PATH = os.getenv("NEWS_AGENT_DB") or os.path.join(APP_DIR, "news_agent.db")
+APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 USER_AGENT = "DailyNewsDigestAgent/1.0 (+local RSS reader)"
 MODEL = os.getenv("NEWS_AGENT_MODEL", "claude-opus-5-5")
 
@@ -1241,6 +1248,29 @@ def scheduler_loop(run_at: str) -> None:
 app = FastAPI(title="Daily Industry News Summarizer Agent")
 
 
+@app.middleware("http")
+async def require_password(request, call_next):
+    """Optional HTTP Basic gate (any username) so a public deployment is not open to everyone."""
+    if not APP_PASSWORD or request.url.path == "/healthz":
+        return await call_next(request)
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("basic "):
+        try:
+            supplied = base64.b64decode(header[6:]).decode("utf-8").partition(":")[2]
+        except Exception:
+            supplied = ""
+        if secrets.compare_digest(supplied.encode("utf-8"), APP_PASSWORD.encode("utf-8")):
+            return await call_next(request)
+    return PlainTextResponse("Password required.", status_code=401,
+                             headers={"WWW-Authenticate": 'Basic realm="Newsroom Agent"'})
+
+
+@app.get("/healthz")
+def healthz() -> Dict[str, bool]:
+    """Unauthenticated liveness check for hosting platforms."""
+    return {"ok": True}
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return PAGE
@@ -2341,7 +2371,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Daily Industry News Summarizer Agent")
     parser.add_argument("--once", action="store_true",
                         help="run one digest headless, print the markdown, deliver, exit")
-    parser.add_argument("--port", type=int, default=int(os.getenv("NEWS_AGENT_PORT", "8000")))
+    parser.add_argument("--host", default=os.getenv("NEWS_AGENT_HOST", "127.0.0.1"),
+                        help="address to listen on; use 0.0.0.0 when deploying")
+    parser.add_argument("--port", type=int,
+                        default=int(os.getenv("PORT") or os.getenv("NEWS_AGENT_PORT") or "8000"))
     parser.add_argument("--no-browser", action="store_true", help="do not open a browser")
     args = parser.parse_args()
 
@@ -2358,8 +2391,9 @@ def main() -> None:
                 print(f"\n(skipped {label}: {exc})")
         return
 
-    port = free_port(args.port)
-    url = f"http://127.0.0.1:{port}"
+    local = args.host in ("127.0.0.1", "localhost")
+    port = free_port(args.port) if local else args.port   # a host assigns the port; do not hunt
+    url = f"http://{'127.0.0.1' if args.host == '0.0.0.0' else args.host}:{port}"
     client = ClaudeClient(log=lambda *_: None)
 
     print("\n" + "=" * 70)
@@ -2369,6 +2403,12 @@ def main() -> None:
     print(f"  Model     : {MODEL}" if client.available
           else f"  Model     : none ({client.reason}) -- extractive fallback")
     print(f"  Database  : {DB_PATH}")
+    print(f"  Listening : {args.host}:{port}")
+    if APP_PASSWORD:
+        print("  Access    : password protected")
+    elif not local:
+        print("  WARNING   : listening beyond this machine with no APP_PASSWORD -- anyone who "
+              "can reach it can use the app.")
     run_at = os.getenv("DAILY_RUN_AT", "").strip()
     if run_at:
         threading.Thread(target=scheduler_loop, args=(run_at,), daemon=True).start()
@@ -2376,10 +2416,10 @@ def main() -> None:
     print("=" * 70)
     print("  Open the link above in your browser. Ctrl+C to stop.\n")
 
-    if not args.no_browser:
+    if local and not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
 
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(app, host=args.host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":
